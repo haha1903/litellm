@@ -175,6 +175,7 @@ from litellm.types.utils import ModelInfo as ModelMapInfo
 from litellm.types.utils import (
     ModelResponseStream,
     StandardLoggingPayload,
+    TextCompletionResponse,
     Usage,
 )
 from litellm.utils import (
@@ -2165,6 +2166,39 @@ class Router:
         )
         setattr(fallback_item, "usage", combined_usage)
 
+    @staticmethod
+    async def _log_interrupted_stream_partial_usage(
+        logging_obj: Optional[LiteLLMLogging],
+        partial_response: Optional[Union[ModelResponse, TextCompletionResponse]],
+    ) -> None:
+        """
+        A mid-stream failure with no successful fallback discards the chunks
+        already streamed to the client, so the interrupted-but-billed response
+        would record zero spend. Run success logging on the assembled partial
+        response so the real partial usage lands in spend tracking. The
+        fallback-success path accounts for partial usage via
+        ``_combine_fallback_usage`` on the fallback's own stream instead, so
+        this runs only on the terminal path where no fallback response is logged.
+        """
+        if logging_obj is None or partial_response is None:
+            return
+        if getattr(partial_response, "usage", None) is None:
+            return
+        try:
+            await logging_obj.dispatch_success_handlers(
+                partial_response,
+                cache_hit=False,
+                start_time=None,
+                end_time=None,
+                prefer_async_handlers=True,
+            )
+        except Exception as log_error:
+            verbose_router_logger.debug(
+                "stream_with_fallbacks: could not log interrupted-stream "
+                "partial usage: %s",
+                log_error,
+            )
+
     async def _acompletion_streaming_iterator(
         self,
         model_response: CustomStreamWrapper,
@@ -2280,6 +2314,10 @@ class Router:
                     # If fallback also fails, log and re-raise original error
                     verbose_router_logger.error(
                         f"Fallback also failed: {fallback_error}"
+                    )
+                    await self._log_interrupted_stream_partial_usage(
+                        logging_obj=getattr(model_response, "logging_obj", None),
+                        partial_response=complete_response_object,
                     )
                     raise fallback_error
             finally:
