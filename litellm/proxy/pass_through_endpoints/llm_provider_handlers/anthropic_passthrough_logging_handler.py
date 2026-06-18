@@ -8,6 +8,9 @@ import litellm
 from litellm._logging import verbose_proxy_logger
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
 from litellm.litellm_core_utils.litellm_logging import use_custom_pricing_for_model
+from litellm.litellm_core_utils.prompt_templates.common_utils import (
+    get_content_from_model_response,
+)
 from litellm.llms.anthropic import get_anthropic_config
 from litellm.llms.anthropic.chat.handler import (
     ModelResponseIterator as AnthropicModelResponseIterator,
@@ -135,6 +138,63 @@ class AnthropicPassthroughLoggingHandler:
                     if model:
                         return model
         return None
+
+    @staticmethod
+    def _stream_has_terminal_message_delta(
+        all_chunks: Sequence[Union[str, bytes]],
+    ) -> bool:
+        for raw in all_chunks:
+            text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+            for line in text.splitlines():
+                if not line.startswith("data:"):
+                    continue
+                try:
+                    data = json.loads(line[len("data:") :].strip())
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if isinstance(data, dict) and data.get("type") == "message_delta":
+                    return True
+        return False
+
+    @staticmethod
+    def _recover_interrupted_stream_output_tokens(
+        response: Union[ModelResponse, TextCompletionResponse],
+        all_chunks: Sequence[Union[str, bytes]],
+        model: str,
+    ) -> None:
+        """
+        An Anthropic stream interrupted before its terminal ``message_delta``
+        (client disconnect) carries only the ``message_start`` ``output_tokens``
+        placeholder (typically 1-3), so completion tokens and spend are
+        undercounted ~20x. Re-tokenize the buffered output text to recover a
+        realistic ``output_tokens`` for usage/cost. Completed streams are
+        untouched because their terminal ``message_delta`` short-circuits here.
+        """
+        if not isinstance(response, ModelResponse):
+            return
+        if AnthropicPassthroughLoggingHandler._stream_has_terminal_message_delta(
+            all_chunks
+        ):
+            return
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            return
+        output_text = get_content_from_model_response(response)
+        if not output_text:
+            return
+        recovered_output_tokens = litellm.token_counter(
+            model=model, text=output_text, count_response_tokens=True
+        )
+        if recovered_output_tokens <= (usage.completion_tokens or 0):
+            return
+        usage.completion_tokens = recovered_output_tokens
+        usage.total_tokens = (usage.prompt_tokens or 0) + recovered_output_tokens
+        # Anthropic costing reads completion_tokens_details.text_tokens, so the
+        # stale message_start placeholder there must be corrected too or spend
+        # stays undercounted even after completion_tokens is fixed.
+        details = getattr(usage, "completion_tokens_details", None)
+        if details is not None and getattr(details, "text_tokens", None) is not None:
+            details.text_tokens = recovered_output_tokens
 
     @staticmethod
     def _create_anthropic_response_logging_payload(
@@ -277,6 +337,11 @@ class AnthropicPassthroughLoggingHandler:
                 "result": None,
                 "kwargs": {},
             }
+        AnthropicPassthroughLoggingHandler._recover_interrupted_stream_output_tokens(
+            response=complete_streaming_response,
+            all_chunks=all_chunks,
+            model=model,
+        )
         kwargs = AnthropicPassthroughLoggingHandler._create_anthropic_response_logging_payload(
             litellm_model_response=complete_streaming_response,
             model=model,
