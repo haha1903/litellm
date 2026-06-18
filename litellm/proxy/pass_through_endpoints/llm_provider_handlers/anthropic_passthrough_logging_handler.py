@@ -182,9 +182,16 @@ class AnthropicPassthroughLoggingHandler:
         output_text = get_content_from_model_response(response)
         if not output_text:
             return
-        recovered_output_tokens = litellm.token_counter(
-            model=model, text=output_text, count_response_tokens=True
-        )
+        try:
+            recovered_output_tokens = litellm.token_counter(
+                model=model, text=output_text, count_response_tokens=True
+            )
+        except Exception:
+            verbose_proxy_logger.warning(
+                "Could not re-tokenize interrupted stream output; "
+                "keeping placeholder completion token count."
+            )
+            return
         if recovered_output_tokens <= (usage.completion_tokens or 0):
             return
         usage.completion_tokens = recovered_output_tokens

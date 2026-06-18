@@ -1491,13 +1491,14 @@ class TestInterruptedStreamOutputTokenRecovery:
     def _completed_chunks(self, *, final_output_tokens: int = 80):
         chunks = self._interrupted_chunks()
         chunks.append(
-            json.dumps(
+            "data: "
+            + json.dumps(
                 {
                     "type": "message_delta",
                     "delta": {"stop_reason": "end_turn", "stop_sequence": None},
                     "usage": {"output_tokens": final_output_tokens},
                 }
-            ).join(("data: ", ""))
+            )
         )
         chunks.append('data: {"type": "message_stop"}')
         return chunks
