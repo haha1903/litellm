@@ -2,7 +2,7 @@ name: Build patched litellm image
 
 on:
   push:
-    tags: ['patched-v*']
+    tags: ['v*']
   workflow_dispatch:
 
 env:
@@ -40,8 +40,9 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ github.repository }}
           tags: |
-            type=match,pattern=patched-(v.*),group=1
-            type=raw,value=patched-latest
+            type=semver,pattern=v{{version}}
+            type=semver,pattern=v{{major}}.{{minor}}
+            type=raw,value=latest
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
